@@ -45,6 +45,7 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
  * 화면 캡처를 계속 켜 두고, 버튼(또는 화면 변화)에 맞춰
@@ -873,25 +874,36 @@ class TranslatorService : Service() {
                 toast("글자를 찾지 못했어요 (언어: ${Engine.name(eng.mode)})\n버튼을 길게 눌러 언어를 바꿀 수 있어요")
             }
 
-            // 캐시에 있는 문장은 바로 표시하고, 나머지는 번역되는 대로 하나씩 표시
-            val pending = ArrayList<Pair<Engine.Block, RectF>>()
+            // 화면 좌표로 바꾸고, 버튼 자리에 있는 글은 뺀다
+            val kept = ArrayList<Engine.Block>()
+            val srcRects = ArrayList<RectF>()
             for (b in blocks) {
                 val r = RectF(
                     (b.rect.left + roi.left) * sx, (b.rect.top + roi.top) * sy,
                     (b.rect.right + roi.left) * sx, (b.rect.bottom + roi.top) * sy
                 )
                 if (btn != null && btn.contains(r.centerX(), r.centerY())) continue
+                kept.add(b)
+                srcRects.add(r)
+            }
+            val targets = targetRects(srcRects, kept.map { it.vertical })
+
+            // 캐시에 있는 문장은 바로 표시하고, 나머지는 번역되는 대로 하나씩 표시
+            val pending = ArrayList<Int>()
+            for (i in kept.indices) {
+                val b = kept[i]
                 val hit = eng.cached(b.text, b.lang)
                 if (hit != null) {
-                    val box = BoxesView.Box(r, hit)
+                    val box = BoxesView.Box(targets[i], hit, b.vertical, b.thickness * sx)
                     main.post { if (gen == generation) boxesView?.add(box) }
                 } else {
-                    pending.add(Pair(b, r))
+                    pending.add(i)
                 }
             }
-            for ((b, r) in pending) {
+            for (i in pending) {
                 if (gen != generation) break
-                val box = BoxesView.Box(r, eng.translate(b.text, b.lang))
+                val b = kept[i]
+                val box = BoxesView.Box(targets[i], eng.translate(b.text, b.lang), b.vertical, b.thickness * sx)
                 main.post { if (gen == generation) boxesView?.add(box) }
             }
         } catch (e: Exception) {
@@ -906,6 +918,44 @@ class TranslatorService : Service() {
             baselineReadyAt = SystemClock.uptimeMillis() + 400
             frameDirty = false
             setBusy(false)
+        }
+    }
+
+    /**
+     * 번역문을 넣을 자리 계산.
+     * 세로쓰기 말풍선은 가로로 쓴 한국어가 들어가기 좋게 옆으로 넓히고,
+     * 이웃한 글 상자와 겹치지 않는 데까지만 넓힌다. 원래 글자는 항상 덮는다.
+     */
+    private fun targetRects(src: List<RectF>, vertical: List<Boolean>): List<RectF> {
+        val maxW = screenW * 0.6f
+        val minW = dp(64).toFloat()
+        val gap = dp(4).toFloat()
+        return src.mapIndexed { i, r ->
+            val want = if (vertical[i]) {
+                max(r.width(), sqrt(r.width() * r.height()) * 1.25f)
+            } else {
+                max(r.width(), minW)
+            }
+            val w = min(want, max(r.width(), maxW))
+            var left: Float
+            var right: Float
+            if (vertical[i]) {
+                left = r.centerX() - w / 2f
+                right = r.centerX() + w / 2f
+            } else {
+                left = r.left
+                right = r.left + w
+            }
+            for (j in src.indices) {
+                if (j == i) continue
+                val o = src[j]
+                if (o.bottom <= r.top || o.top >= r.bottom) continue   // 위아래로 안 겹치면 상관없음
+                if (o.right <= r.left) left = max(left, o.right + gap)
+                else if (o.left >= r.right) right = min(right, o.left - gap)
+            }
+            left = max(0f, min(left, r.left))
+            right = min(screenW.toFloat(), max(right, r.right))
+            RectF(left, r.top, right, r.bottom)
         }
     }
 

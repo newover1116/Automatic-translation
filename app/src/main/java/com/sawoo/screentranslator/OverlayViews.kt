@@ -20,13 +20,17 @@ import kotlin.math.min
  */
 class BoxesView(ctx: Context) : View(ctx) {
 
-    class Box(val rect: RectF, val text: String)
-    private class Laid(val bg: RectF, val layout: StaticLayout)
+    /**
+     * rect: 번역문을 넣을 자리(화면 좌표). vertical: 원문이 세로쓰기(만화 말풍선 등)였는지.
+     * thickness: 원문 글자 크기(px). 번역문 글자 크기를 원문과 비슷하게 맞추는 데 쓴다.
+     */
+    class Box(val rect: RectF, val text: String, val vertical: Boolean = false, val thickness: Float = 0f)
+    private class Laid(val bg: RectF, val layout: StaticLayout, val dy: Float)
 
     private val density = resources.displayMetrics.density
     private val pad = 3f * density
-    private val minText = 10f * density
-    private val maxText = 24f * density
+    private val minText = 9f * density
+    private val maxText = 22f * density
 
     @Volatile
     private var items: List<Laid> = emptyList()
@@ -73,24 +77,30 @@ class BoxesView(ctx: Context) : View(ctx) {
     }
 
     private fun layoutBox(b: Box): Laid {
-        val width = max(b.rect.width(), 28f * density)
+        val target = b.rect
+        val width = max(target.width(), 28f * density)
         val innerW = max(1, (width - 2 * pad).toInt())
-        val innerH = b.rect.height() - 2 * pad
+        val innerH = target.height() - 2 * pad
         val text = b.text
-        var size = (b.rect.height() * 0.75f).coerceIn(minText, maxText)
+        // 원문 글자 크기에서 시작해서, 자리에 다 들어갈 때까지 줄인다
+        val hint = if (b.thickness > 0f) b.thickness * 0.85f else target.height() * 0.75f
+        var size = hint.coerceIn(minText, maxText)
+        val align = if (b.vertical) Layout.Alignment.ALIGN_CENTER else Layout.Alignment.ALIGN_NORMAL
         var layout: StaticLayout
         while (true) {
             textPaint.textSize = size
             layout = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, innerW)
-                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setAlignment(align)
                 .setIncludePad(false)
                 .build()
             if (layout.height <= innerH || size <= minText) break
             size = max(minText, size * 0.9f)
         }
-        val h = max(b.rect.height(), layout.height + 2 * pad)
-        val bg = RectF(b.rect.left, b.rect.top, b.rect.left + width, b.rect.top + h)
-        return Laid(bg, layout)
+        // 원래 글자는 전부 덮고, 번역문은 상자 안 세로 가운데에
+        val h = max(target.height(), layout.height + 2 * pad)
+        val bg = RectF(target.left, target.top, target.left + width, target.top + h)
+        val dy = (h - layout.height) / 2f
+        return Laid(bg, layout, dy)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -102,7 +112,7 @@ class BoxesView(ctx: Context) : View(ctx) {
         for (it in list) {
             canvas.drawRoundRect(it.bg, 6f * density, 6f * density, bgPaint)
             canvas.save()
-            canvas.translate(it.bg.left + pad, it.bg.top + pad)
+            canvas.translate(it.bg.left + pad, it.bg.top + it.dy)
             it.layout.draw(canvas)
             canvas.restore()
         }

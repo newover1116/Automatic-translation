@@ -14,6 +14,8 @@ import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.text.Normalizer
+import kotlin.math.max
 
 /**
  * 글자 인식(OCR) + 번역 엔진. 모두 기기 안에서 동작한다.
@@ -88,31 +90,120 @@ class Engine(val mode: String) {
         synchronized(readyLangs) { readyLangs.add(lang) }
     }
 
-    class Block(val text: String, val rect: Rect, val lang: String)
+    /**
+     * 번역할 글 덩어리 하나 (말풍선 하나, 문단 하나).
+     * vertical: 세로쓰기였는지. thickness: 원문 글자 크기(px, 캡처 기준).
+     */
+    class Block(val text: String, val rect: Rect, val lang: String, val vertical: Boolean, val thickness: Int)
+
+    private class Ln(val text: String, val r: Rect)
+
+    private class Grp(val lines: MutableList<Ln>, val vertical: Boolean) {
+        fun rect(): Rect {
+            val u = Rect(lines[0].r)
+            for (l in lines) u.union(l.r)
+            return u
+        }
+
+        /** 줄 두께의 중앙값 = 대략적인 글자 크기 */
+        fun thickness(): Int {
+            val xs = lines.map { if (vertical) it.r.width() else it.r.height() }.sorted()
+            return max(1, xs[xs.size / 2])
+        }
+    }
 
     fun recognize(bmp: Bitmap): List<Block> {
         val result = Tasks.await(recognizer.process(InputImage.fromBitmap(bmp, 0)))
-        val raw = ArrayList<Pair<String, Rect>>()
+        val groups = ArrayList<Grp>()
         for (b in result.textBlocks) {
-            val r = b.boundingBox ?: continue
-            val lines = b.lines.map { it.text.trim() }.filter { it.isNotEmpty() }
-            if (lines.isEmpty()) continue
-            // 알파벳 문장은 줄 사이에 띄어쓰기, 일본어·중국어는 그냥 이어 붙임
-            val sb = StringBuilder(lines[0])
-            for (i in 1 until lines.size) {
-                val prev = sb[sb.length - 1]
-                val next = lines[i][0]
-                if (isLatinLetter(prev) && isLatinLetter(next)) sb.append(' ')
-                sb.append(lines[i])
+            val lines = ArrayList<Ln>()
+            for (l in b.lines) {
+                val r = l.boundingBox ?: continue
+                val t = clean(l.text)
+                if (t.isNotEmpty()) lines.add(Ln(t, r))
             }
-            val text = sb.toString()
+            if (lines.isEmpty()) continue
+            // 세로로 긴 줄이 더 많으면 세로쓰기(만화 말풍선 등)
+            var vScore = 0
+            var hScore = 0
+            for (l in lines) {
+                val w = l.r.width()
+                val h = l.r.height()
+                if (h > w * 1.4f) vScore += l.text.length
+                else if (w > h * 1.4f) hScore += l.text.length
+            }
+            groups.add(Grp(lines, mode != "en" && vScore > hScore))
+        }
+        mergeVertical(groups)
+
+        val out = ArrayList<Pair<Grp, String>>()
+        for (g in groups) {
+            val text = assemble(g)
             if (text.none { it.isLetter() }) continue   // 숫자·기호만 있으면 건너뜀
             if (mostlyHangul(text)) continue             // 이미 한국어면 건너뜀
-            raw.add(Pair(text, r))
+            out.add(Pair(g, text))
         }
         // 화면 어딘가에 가나(ひらがな·カタカナ)가 있으면 한자만 있는 글도 일본어로 본다
-        val screenHasKana = raw.any { (t, _) -> t.any { isKana(it) } }
-        return raw.map { (t, r) -> Block(t, r, detect(t, screenHasKana)) }
+        val screenHasKana = out.any { p -> p.second.any { isKana(it) } }
+        return out.map { (g, t) -> Block(t, g.rect(), detect(t, screenHasKana), g.vertical, g.thickness()) }
+    }
+
+    /** 같은 말풍선인데 따로 인식된 세로 줄 덩어리들을 하나로 합친다 */
+    private fun mergeVertical(groups: MutableList<Grp>) {
+        var merged = true
+        while (merged) {
+            merged = false
+            loop@ for (i in groups.indices) {
+                val a = groups[i]
+                if (!a.vertical) continue
+                for (j in i + 1 until groups.size) {
+                    val b = groups[j]
+                    if (!b.vertical) continue
+                    val m = (max(a.thickness(), b.thickness()) * 0.6f).toInt()
+                    val ra = a.rect()
+                    ra.inset(-m, -m)
+                    if (Rect.intersects(ra, b.rect())) {
+                        a.lines.addAll(b.lines)
+                        groups.removeAt(j)
+                        merged = true
+                        break@loop
+                    }
+                }
+            }
+        }
+    }
+
+    /** 줄들을 읽는 순서대로 이어 붙여 한 문장으로 만든다 */
+    private fun assemble(g: Grp): String {
+        val med = g.thickness().toFloat()
+        // 한자 옆의 작은 읽기 표시(후리가나)는 빼야 번역이 자연스럽다
+        var lines: List<Ln> = g.lines.filter { l ->
+            val th = if (g.vertical) l.r.width() else l.r.height()
+            !(th < med * 0.6f && l.text.length <= 8 && l.text.all { isKana(it) })
+        }
+        if (lines.isEmpty()) lines = g.lines
+        val sorted = if (g.vertical) {
+            lines.sortedByDescending { it.r.centerX() }          // 세로쓰기: 오른쪽 줄부터
+        } else {
+            val row = max(1f, med * 0.7f)
+            lines.sortedWith(compareBy<Ln>({ (it.r.top / row).toInt() }, { it.r.left }))
+        }
+        val sb = StringBuilder(sorted[0].text)
+        for (i in 1 until sorted.size) {
+            val t = sorted[i].text
+            // 알파벳끼리는 띄어쓰기, 일본어·중국어는 그냥 이어 붙임
+            if (isLatinLetter(sb[sb.length - 1]) && isLatinLetter(t[0])) sb.append(' ')
+            sb.append(t)
+        }
+        return sb.toString()
+    }
+
+    private val longVowel = Regex("(?<=[\\u3040-\\u30FF])[|｜丨](?=[\\u3040-\\u30FF]|$)")
+
+    /** 전각/반각·세로쓰기용 문자 정리, 세로 장음(ー)이 막대로 읽힌 것 복구 */
+    private fun clean(s: String): String {
+        val t = Normalizer.normalize(s, Normalizer.Form.NFKC).trim()
+        return longVowel.replace(t, "ー")
     }
 
     private fun detect(text: String, screenHasKana: Boolean): String {
