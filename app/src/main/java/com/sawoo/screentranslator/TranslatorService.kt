@@ -63,6 +63,7 @@ class TranslatorService : Service() {
     companion object {
         const val ACTION_START = "com.sawoo.screentranslator.START"
         const val ACTION_STOP = "com.sawoo.screentranslator.STOP"
+        const val ACTION_SET_LANG = "com.sawoo.screentranslator.SET_LANG"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_DATA = "result_data"
         private const val CHANNEL_ID = "translator"
@@ -101,7 +102,7 @@ class TranslatorService : Service() {
     @Volatile private var capH = 0
     private var dpi = 0
 
-    private lateinit var engine: Engine
+    @Volatile private lateinit var engine: Engine
 
     // ---- 화면에 띄우는 것들 ----
     @Volatile private var boxesView: BoxesView? = null
@@ -163,6 +164,10 @@ class TranslatorService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
+            ACTION_SET_LANG -> {
+                if (projection != null) switchLanguage(Prefs.lang(this))
+                return START_NOT_STICKY
+            }
             ACTION_START -> {
                 if (projection != null) return START_NOT_STICKY
                 startInForeground()
@@ -188,11 +193,7 @@ class TranslatorService : Service() {
                 running = true
                 setupCapture(p)
                 setupOverlays()
-                if (!engine.ready) toast("번역 모델 준비 중… (처음 한 번만, 약 30MB)")
-                engine.prepare { ok ->
-                    if (ok) toast("준비 완료! 번역 버튼을 눌러보세요")
-                    else toast("번역 모델을 받지 못했어요. 인터넷 연결을 확인해 주세요")
-                }
+                prepareEngine(engine, "준비 완료! 번역 버튼을 눌러보세요")
                 work.postDelayed(tick, 500)
             }
         }
@@ -600,6 +601,95 @@ class TranslatorService : Service() {
         main.post { updateButton() }
     }
 
+    private fun showLangMenu() {
+        val items = ArrayList<Pair<String, () -> Unit>>()
+        for ((code, label) in Engine.NAMES) {
+            val mark = if (code == engine.mode) "✓ " else "    "
+            items.add(Pair(mark + label) {
+                if (code != engine.mode) {
+                    Prefs.setLang(this, code)
+                    switchLanguage(code)
+                }
+            })
+        }
+        items.add(Pair("닫기") { })
+        showList(items)
+    }
+
+    private fun showList(entries: List<Pair<String, () -> Unit>>) {
+        if (menuView != null) return
+        menuOpen = true
+        val pad = dp(8)
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(pad, pad, pad, pad)
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(16).toFloat()
+        bg.setColor(0xF2202124.toInt())
+        box.background = bg
+        for ((label, action) in entries) {
+            val tv = TextView(this)
+            tv.text = label
+            tv.setTextColor(Color.WHITE)
+            tv.textSize = 16f
+            tv.setPadding(dp(20), dp(13), dp(20), dp(13))
+            tv.setOnClickListener {
+                dismissMenu()
+                action()
+            }
+            box.addView(tv)
+        }
+        addMenuWindow(box)
+    }
+
+    private fun addMenuWindow(box: LinearLayout) {
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT
+        )
+        lp.gravity = Gravity.CENTER
+        box.setOnTouchListener { _, e ->
+            if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+                dismissMenu()
+                true
+            } else {
+                false
+            }
+        }
+        try {
+            wm.addView(box, lp)
+            menuView = box
+        } catch (e: Exception) {
+            menuOpen = false
+        }
+    }
+
+    /** 언어 바꾸기: 번역을 멈추지 않고 바로 적용 */
+    private fun switchLanguage(code: String) {
+        work.post {
+            val old = engine
+            if (old.mode == code) return@post
+            val ne = Engine(code)
+            engine = ne
+            old.close()
+            main.post {
+                clearTranslation()
+                prepareEngine(ne, "언어를 ${Engine.name(code)}(으)로 바꿨어요")
+            }
+        }
+    }
+
+    private fun prepareEngine(e: Engine, readyMsg: String) {
+        if (!e.isReady()) toast("번역 모델 받는 중… (언어마다 처음 한 번만, 약 30MB)")
+        e.prepare { ok ->
+            if (ok) toast(readyMsg)
+            else toast("번역 모델을 받지 못했어요. 인터넷 연결을 확인해 주세요")
+        }
+    }
+
     private fun showMenu() {
         if (menuView != null) return
         menuOpen = true
@@ -625,6 +715,7 @@ class TranslatorService : Service() {
             box.addView(tv)
         }
 
+        item("언어: ${Engine.name(engine.mode)}  ▸") { main.postDelayed({ showLangMenu() }, 150) }
         item(if (autoMode) "자동 번역 끄기" else "자동 번역 켜기 (화면이 바뀌면 알아서)") { setAuto(!autoMode) }
         item("번역 영역 지정") { main.postDelayed({ showRegionSelect() }, 200) }
         if (roiNorm != null) item("영역 해제 (전체 화면 번역)") {
@@ -739,7 +830,7 @@ class TranslatorService : Service() {
     /** 번역 버튼 탭: 언제나 지금 화면을 새로 번역 (지우기는 따로 있는 버튼으로) */
     private fun onButtonTap() {
         if (busy) return
-        if (!engine.ready) toast("번역 모델 준비 중이에요. 잠시만요…")
+        if (!engine.isReady()) toast("번역 모델 받는 중이에요 (처음 한 번만). 잠시만요…")
         requestTranslate()
     }
 
@@ -754,7 +845,6 @@ class TranslatorService : Service() {
         lastRunAt = SystemClock.uptimeMillis()
         val gen = generation
         try {
-            engine.ensureReady()
             // 번역 박스가 캡처에 찍히지 않게 잠깐 숨기고 새 화면을 기다린다
             val hid = onMain(false) { boxesView?.hideForCapture() ?: false }
             if (hid) Thread.sleep(160)
@@ -771,34 +861,37 @@ class TranslatorService : Service() {
             val img = if (roi.width() == frame.width && roi.height() == frame.height) frame
             else Bitmap.createBitmap(frame, roi.left, roi.top, roi.width(), roi.height())
 
-            val blocks = engine.recognize(img)
+            val eng = engine
+            val blocks = eng.recognize(img)
             val sx = screenW.toFloat() / capW
             val sy = screenH.toFloat() / capH
             val btn = buttonRect
             if (gen != generation) return   // 그 사이에 '지우기'를 눌렀으면 그만
 
             main.post { if (gen == generation) boxesView?.begin() }
-            if (blocks.isEmpty() && !autoMode) toast("번역할 글자를 찾지 못했어요")
+            if (blocks.isEmpty() && !autoMode) {
+                toast("글자를 찾지 못했어요 (언어: ${Engine.name(eng.mode)})\n버튼을 길게 눌러 언어를 바꿀 수 있어요")
+            }
 
             // 캐시에 있는 문장은 바로 표시하고, 나머지는 번역되는 대로 하나씩 표시
-            val pending = ArrayList<Pair<String, RectF>>()
+            val pending = ArrayList<Pair<Engine.Block, RectF>>()
             for (b in blocks) {
                 val r = RectF(
                     (b.rect.left + roi.left) * sx, (b.rect.top + roi.top) * sy,
                     (b.rect.right + roi.left) * sx, (b.rect.bottom + roi.top) * sy
                 )
                 if (btn != null && btn.contains(r.centerX(), r.centerY())) continue
-                val hit = engine.cached(b.text)
+                val hit = eng.cached(b.text, b.lang)
                 if (hit != null) {
                     val box = BoxesView.Box(r, hit)
                     main.post { if (gen == generation) boxesView?.add(box) }
                 } else {
-                    pending.add(Pair(b.text, r))
+                    pending.add(Pair(b, r))
                 }
             }
-            for ((text, r) in pending) {
+            for ((b, r) in pending) {
                 if (gen != generation) break
-                val box = BoxesView.Box(r, engine.translate(text))
+                val box = BoxesView.Box(r, eng.translate(b.text, b.lang))
                 main.post { if (gen == generation) boxesView?.add(box) }
             }
         } catch (e: Exception) {

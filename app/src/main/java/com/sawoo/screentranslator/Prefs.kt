@@ -7,8 +7,8 @@ import android.graphics.RectF
 object Prefs {
     private fun sp(c: Context) = c.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
-    /** 원문 언어: "en" 영어, "ja" 일본어, "zh" 중국어 */
-    fun lang(c: Context): String = sp(c).getString("lang", "en") ?: "en"
+    /** 원문 언어: "auto" 자동 감지, "en" 영어, "ja" 일본어, "zh" 중국어 */
+    fun lang(c: Context): String = sp(c).getString("lang", "auto") ?: "auto"
     fun setLang(c: Context, v: String) = sp(c).edit().putString("lang", v).apply()
 
     /** 번역 영역 (화면 크기에 대한 0~1 비율). null이면 전체 화면 */

@@ -31,8 +31,8 @@ class MainActivity : Activity() {
         private const val REQ_NOTIF = 1002
     }
 
-    private val langCodes = arrayOf("en", "ja", "zh")
-    private val langNames = arrayOf("영어 → 한국어", "일본어 → 한국어", "중국어 → 한국어")
+    private val langCodes = Engine.NAMES.keys.toTypedArray()
+    private val langNames = Engine.NAMES.values.map { "$it → 한국어" }.toTypedArray()
     private lateinit var status: TextView
     private var askedNotif = false
 
@@ -60,7 +60,7 @@ class MainActivity : Activity() {
         title.setTextColor(Color.BLACK)
         root.addView(title)
 
-        root.addView(label("번역할 언어"))
+        root.addView(label("번역할 언어 (모르겠으면 자동 감지)"))
         val spinner = Spinner(this)
         spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, langNames)
         spinner.setSelection(langCodes.indexOf(Prefs.lang(this)).coerceAtLeast(0))
@@ -70,7 +70,11 @@ class MainActivity : Activity() {
                 if (code != Prefs.lang(this@MainActivity)) {
                     Prefs.setLang(this@MainActivity, code)
                     if (TranslatorService.running) {
-                        toast("언어를 바꿨어요. 번역을 중지했다가 다시 시작하면 적용돼요")
+                        // 실행 중이면 바로 적용
+                        startService(
+                            Intent(this@MainActivity, TranslatorService::class.java)
+                                .setAction(TranslatorService.ACTION_SET_LANG)
+                        )
                     }
                 }
             }
@@ -106,6 +110,7 @@ class MainActivity : Activity() {
                     "2. 화면에 동그란 '번역' 버튼이 생겨요. 번역할 앱으로 가서 버튼을 누르면 글자 위에 한국어 번역이 떠요.\n\n" +
                     "3. 화면이 바뀌면 '번역' 버튼을 다시 누르면 새로 번역해요. 번역을 없애려면 아래의 회색 '지우기' 버튼을 누르세요.\n\n" +
                     "4. 버튼을 길게 누르면 메뉴가 나와요.\n" +
+                    "   • 언어: 자동 감지 / 일본어 / 영어 / 중국어 (바로 적용)\n" +
                     "   • 자동 번역: 화면이 바뀌면 알아서 다시 번역 (버튼이 초록색)\n" +
                     "   • 번역 영역 지정: 대화창·자막처럼 한 부분만 번역하면 훨씬 빨라요\n" +
                     "   • 번역기 종료\n\n" +
