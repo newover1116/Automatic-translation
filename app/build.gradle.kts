@@ -16,8 +16,16 @@ android {
         targetSdk = 35
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
+        // 요즘 폰(64비트)용만 넣어서 용량을 줄인다
         ndk {
-            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
+            abiFilters.add("arm64-v8a")
+        }
+    }
+
+    // 엔진 파일(.so)을 압축해서 넣어 다운로드 용량을 줄인다
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 
