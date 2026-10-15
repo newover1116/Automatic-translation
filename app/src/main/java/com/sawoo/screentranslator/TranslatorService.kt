@@ -107,7 +107,11 @@ class TranslatorService : Service() {
     @Volatile private var boxesView: BoxesView? = null
     private var button: TextView? = null
     private var buttonLp: WindowManager.LayoutParams? = null
+    private var clearBtn: TextView? = null
+    private var clearLp: WindowManager.LayoutParams? = null
     @Volatile private var buttonRect: RectF? = null
+    /** '지우기'를 누를 때마다 올라감. 진행 중이던 번역 결과가 다시 뜨지 않게 막는 용도 */
+    @Volatile private var generation = 0
     private var menuView: View? = null
     private var regionView: View? = null
 
@@ -201,7 +205,7 @@ class TranslatorService : Service() {
         main.removeCallbacksAndMessages(null)
         dismissMenu()
         removeRegionView()
-        for (v in listOf<View?>(boxesView, button)) {
+        for (v in listOf<View?>(boxesView, button, clearBtn)) {
             if (v != null) try {
                 wm.removeView(v)
             } catch (_: Exception) {
@@ -209,6 +213,7 @@ class TranslatorService : Service() {
         }
         boxesView = null
         button = null
+        clearBtn = null
         try { virtualDisplay?.release() } catch (_: Exception) {}
         virtualDisplay = null
         val p = projection
@@ -375,6 +380,7 @@ class TranslatorService : Service() {
             lp.x = lp.x.coerceIn(0, max(0, screenW - dp(54)))
             lp.y = lp.y.coerceIn(0, max(0, screenH - dp(54)))
             try { wm.updateViewLayout(b, lp) } catch (_: Exception) {}
+            positionClearButton()
             updateButtonRect()
         }
     }
@@ -463,6 +469,7 @@ class TranslatorService : Service() {
                             lp.x = startX + dx.toInt()
                             lp.y = startY + dy.toInt()
                             try { wm.updateViewLayout(v, lp) } catch (_: Exception) {}
+                            positionClearButton()
                         }
                     }
                     MotionEvent.ACTION_UP -> {
@@ -493,17 +500,79 @@ class TranslatorService : Service() {
         button = tv
         buttonLp = lp
         updateButton()
+        addClearButton()
         updateButtonRect()
     }
 
+    /** 번역 버튼 바로 아래에 붙어 다니는 '지우기' 버튼 */
+    private fun addClearButton() {
+        val small = dp(40)
+        val tv = TextView(this)
+        tv.gravity = Gravity.CENTER
+        tv.setTextColor(Color.WHITE)
+        tv.textSize = 11f
+        tv.typeface = Typeface.DEFAULT_BOLD
+        tv.text = "지우기"
+        val bg = GradientDrawable()
+        bg.shape = GradientDrawable.OVAL
+        bg.setColor(0xFF616161.toInt())
+        bg.setStroke(dp(2), 0x66FFFFFF)
+        tv.background = bg
+        tv.alpha = 0.92f
+        tv.setOnClickListener { clearTranslation() }
+
+        val clp = WindowManager.LayoutParams(
+            small, small, overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        clp.gravity = Gravity.TOP or Gravity.START
+        clearBtn = tv
+        clearLp = clp
+        placeClearButton()
+        wm.addView(tv, clp)
+    }
+
+    /** 지우기 버튼 위치를 번역 버튼 아래(화면 끝이면 위)로 계산 */
+    private fun placeClearButton() {
+        val lp = buttonLp ?: return
+        val clp = clearLp ?: return
+        val big = dp(54)
+        val small = dp(40)
+        clp.x = lp.x + (big - small) / 2
+        clp.y = lp.y + big + dp(8)
+        if (clp.y + small > screenH) clp.y = lp.y - small - dp(8)
+    }
+
+    private fun positionClearButton() {
+        val c = clearBtn ?: return
+        val clp = clearLp ?: return
+        placeClearButton()
+        try { wm.updateViewLayout(c, clp) } catch (_: Exception) {}
+    }
+
+    private fun clearTranslation() {
+        generation++
+        boxesView?.clear()
+        resetBaseline()
+    }
+
+    private fun viewRect(v: View): RectF {
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        return RectF(loc[0].toFloat(), loc[1].toFloat(), (loc[0] + v.width).toFloat(), (loc[1] + v.height).toFloat())
+    }
+
+    /** 두 버튼이 차지하는 화면 영역 (글자 인식·변화 감지에서 제외) */
     private fun updateButtonRect() {
         val b = button ?: return
-        b.post {
-            val loc = IntArray(2)
-            b.getLocationOnScreen(loc)
+        b.postDelayed({
+            val r = viewRect(b)
+            clearBtn?.let { r.union(viewRect(it)) }
             val m = dp(6).toFloat()
-            buttonRect = RectF(loc[0] - m, loc[1] - m, loc[0] + b.width + m, loc[1] + b.height + m)
-        }
+            r.inset(-m, -m)
+            buttonRect = r
+        }, 80)
     }
 
     private fun updateButton() {
@@ -562,10 +631,7 @@ class TranslatorService : Service() {
             setRoi(null)
             toast("전체 화면을 번역해요")
         }
-        item("번역 지우기") {
-            boxesView?.clear()
-            resetBaseline()
-        }
+        item("번역 지우기") { clearTranslation() }
         item("번역기 종료") { stopSelf() }
         item("닫기") { }
 
@@ -670,21 +736,11 @@ class TranslatorService : Service() {
     // 번역
     // =====================================================================
 
-    /** 버튼 탭: 화면이 그대로면 번역을 지우고, 바뀌었으면 새로 번역 */
+    /** 번역 버튼 탭: 언제나 지금 화면을 새로 번역 (지우기는 따로 있는 버튼으로) */
     private fun onButtonTap() {
         if (busy) return
         if (!engine.ready) toast("번역 모델 준비 중이에요. 잠시만요…")
-        setBusy(true)
-        work.post {
-            if (!autoMode && shouldClearInstead()) {
-                main.post { boxesView?.clear() }
-                baseline = null
-                baselineMask = null
-                setBusy(false)
-            } else {
-                doTranslate()
-            }
-        }
+        requestTranslate()
     }
 
     private fun requestTranslate() {
@@ -693,18 +749,10 @@ class TranslatorService : Service() {
         work.post { doTranslate() }
     }
 
-    private fun shouldClearInstead(): Boolean {
-        val bv = boxesView ?: return false
-        if (!bv.hasBoxes) return false
-        val b = baseline ?: return false
-        val m = baselineMask ?: return false
-        val s = currentSig() ?: return false
-        return !changed(b, s, m)
-    }
-
     /** work 스레드에서 실행. 호출 전에 busy=true 로 해 둘 것 */
     private fun doTranslate() {
         lastRunAt = SystemClock.uptimeMillis()
+        val gen = generation
         try {
             engine.ensureReady()
             // 번역 박스가 캡처에 찍히지 않게 잠깐 숨기고 새 화면을 기다린다
@@ -727,8 +775,9 @@ class TranslatorService : Service() {
             val sx = screenW.toFloat() / capW
             val sy = screenH.toFloat() / capH
             val btn = buttonRect
+            if (gen != generation) return   // 그 사이에 '지우기'를 눌렀으면 그만
 
-            main.post { boxesView?.begin() }
+            main.post { if (gen == generation) boxesView?.begin() }
             if (blocks.isEmpty() && !autoMode) toast("번역할 글자를 찾지 못했어요")
 
             // 캐시에 있는 문장은 바로 표시하고, 나머지는 번역되는 대로 하나씩 표시
@@ -742,14 +791,15 @@ class TranslatorService : Service() {
                 val hit = engine.cached(b.text)
                 if (hit != null) {
                     val box = BoxesView.Box(r, hit)
-                    main.post { boxesView?.add(box) }
+                    main.post { if (gen == generation) boxesView?.add(box) }
                 } else {
                     pending.add(Pair(b.text, r))
                 }
             }
             for ((text, r) in pending) {
+                if (gen != generation) break
                 val box = BoxesView.Box(r, engine.translate(text))
-                main.post { boxesView?.add(box) }
+                main.post { if (gen == generation) boxesView?.add(box) }
             }
         } catch (e: Exception) {
             val msg = e.cause?.message ?: e.message ?: e.javaClass.simpleName
@@ -784,7 +834,7 @@ class TranslatorService : Service() {
         if (base == null) {
             // 번역 박스가 화면에 그려진 뒤의 모습을 기준으로 삼는다
             if (now < baselineReadyAt) return
-            if (!autoMode && !bv.hasBoxes) return
+            if (!autoMode) return
             val s = currentSig() ?: return
             baselineMask = makeMask(s)
             baseline = s
