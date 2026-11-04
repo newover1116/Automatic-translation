@@ -194,7 +194,12 @@ class TranslatorService : Service() {
                 running = true
                 setupCapture(p)
                 setupOverlays()
-                prepareEngine(engine, "준비 완료! 번역 버튼을 눌러보세요")
+                val startAuto = Prefs.autoMode(this)
+                prepareEngine(
+                    engine,
+                    if (startAuto) "준비 완료! 화면이 바뀌면 자동으로 번역해요"
+                    else "준비 완료! 번역 버튼을 눌러보세요"
+                ) { ok -> if (ok && startAuto && running) setAuto(true, quiet = true) }
                 work.postDelayed(tick, 500)
             }
         }
@@ -683,11 +688,12 @@ class TranslatorService : Service() {
         }
     }
 
-    private fun prepareEngine(e: Engine, readyMsg: String) {
+    private fun prepareEngine(e: Engine, readyMsg: String, after: ((Boolean) -> Unit)? = null) {
         if (!e.isReady()) toast("번역 모델 받는 중… (언어마다 처음 한 번만, 약 30MB)")
         e.prepare { ok ->
             if (ok) toast(readyMsg)
             else toast("번역 모델을 받지 못했어요. 인터넷 연결을 확인해 주세요")
+            main.post { after?.invoke(ok) }
         }
     }
 
@@ -759,13 +765,14 @@ class TranslatorService : Service() {
         resetBaseline()
     }
 
-    private fun setAuto(on: Boolean) {
+    private fun setAuto(on: Boolean, quiet: Boolean = false) {
         autoMode = on
+        Prefs.setAutoMode(this, on)
         updateButton()
         if (on) {
             main.postDelayed({ requestTranslate() }, 300)
-        } else {
-            toast("자동 번역을 껐어요")
+        } else if (!quiet) {
+            toast("자동 번역을 껐어요. 다음에 켤 때도 꺼진 채로 시작해요")
         }
     }
 

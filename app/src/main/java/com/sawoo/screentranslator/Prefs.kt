@@ -30,6 +30,10 @@ object Prefs {
         e.apply()
     }
 
+    /** 자동 번역(화면이 바뀌면 알아서 번역). 기본값: 켜짐 */
+    fun autoMode(c: Context): Boolean = sp(c).getBoolean("auto_mode", true)
+    fun setAutoMode(c: Context, v: Boolean) = sp(c).edit().putBoolean("auto_mode", v).apply()
+
     fun buttonX(c: Context, def: Int): Int = sp(c).getInt("btn_x", def)
     fun buttonY(c: Context, def: Int): Int = sp(c).getInt("btn_y", def)
     fun setButtonPos(c: Context, x: Int, y: Int) = sp(c).edit().putInt("btn_x", x).putInt("btn_y", y).apply()
