@@ -72,6 +72,10 @@ public final class GameProject {
     public final List<Item> items = new ArrayList<>();
     public final List<String> notes = new ArrayList<>();
     public String engine = "일반 파일";
+    /** 자바/코틀린으로 만든 일반 안드로이드 앱 방식 게임 */
+    private boolean plainApp;
+    /** 대사가 스크립트 코드에 들어 있는 게임(HTML5, 티라노 등) */
+    private boolean scriptGame;
 
     private GameProject(File input, String displayName, Kind kind, Lang lang) {
         this.input = input;
@@ -92,11 +96,40 @@ public final class GameProject {
         if (low.endsWith(".xapk") || low.endsWith(".apks") || low.endsWith(".apkm")) {
             throw new IllegalArgumentException("분할 APK(.xapk, .apks)는 아직 지원하지 않아요. 하나로 된 .apk 파일을 넣어 주세요.");
         }
+        if (kind == Kind.ZIP) {
+            String inner = extractApk(input);
+            if (inner != null) {
+                GameProject g = analyze(new File(input.getParentFile(), "inner.apk"), inner, lang, p);
+                g.notes.add(0, "압축 파일 안의 " + inner + " 을(를) 번역해요.");
+                return g;
+            }
+        }
         GameProject g = new GameProject(input, displayName, kind, lang);
         if (kind == Kind.SINGLE) g.analyzeSingle();
         else g.analyzeArchive(p);
         if (g.items.isEmpty()) g.notes.add(0, "번역할 수 있는 문장을 찾지 못했어요. 원문 언어 설정이 맞는지 확인해 주세요.");
         return g;
+    }
+
+    /** 압축 파일이 사실상 APK 하나를 감싼 것이면 꺼내고 그 이름을 돌려준다. */
+    private static String extractApk(File zipFile) throws IOException {
+        try (ZipFile z = new ZipFile(zipFile)) {
+            ZipEntry best = null;
+            long total = 0;
+            for (ZipEntry e : Collections.list(z.entries())) {
+                total += Math.max(0, e.getSize());
+                String n = e.getName().toLowerCase(Locale.ROOT);
+                if (!e.isDirectory() && n.endsWith(".apk") && !n.contains("__macosx")
+                        && (best == null || e.getSize() > best.getSize())) best = e;
+            }
+            if (best == null || best.getSize() * 2 < total) return null;
+            try (InputStream in = z.getInputStream(best);
+                 OutputStream out = new FileOutputStream(new File(zipFile.getParentFile(), "inner.apk"))) {
+                pipe(in, out);
+            }
+            String n = best.getName();
+            return n.substring(n.lastIndexOf('/') + 1);
+        }
     }
 
     private void analyzeSingle() throws Exception {
@@ -123,7 +156,7 @@ public final class GameProject {
                 FormatHandler h = eligible(e);
                 if (h == null) continue;
                 byte[] data = readAll(zip, e);
-                if (Encoding.looksBinary(data)) continue;
+                if (!(h instanceof ArscHandler) && Encoding.looksBinary(data)) continue;
                 Set<String> found;
                 try {
                     found = collect(h, e.getName(), data);
@@ -134,19 +167,24 @@ public final class GameProject {
             }
         }
         items.sort((a, b) -> a.recommended != b.recommended ? (a.recommended ? -1 : 1) : b.strings - a.strings);
+        if (items.isEmpty()) describeContents();
     }
 
     private FormatHandler eligible(ZipEntry e) {
         if (e.isDirectory() || e.getSize() > MAX_TEXT_FILE) return null;
         String n = e.getName();
-        if (kind == Kind.APK && !n.startsWith("assets/")) return null;
+        if (kind == Kind.APK && !n.startsWith("assets/") && !n.equals("resources.arsc")) return null;
         if (kind == Kind.APK && n.startsWith("assets/x-")) return null;
         if (EXCLUDED.matcher(n).find()) return null;
-        return handlerFor(n, kind);
+        FormatHandler h = handlerFor(n, kind);
+        if (h instanceof CodeStringHandler && CodeStringHandler.isLibrary(n)) return null;
+        return h;
     }
 
     private boolean recommended(String path, FormatHandler h) {
-        if (h instanceof RpgMakerHandler || h instanceof RenpyHandler) return true;
+        if (h instanceof RpgMakerHandler || h instanceof RenpyHandler || h instanceof TyranoHandler) return true;
+        if (h instanceof ArscHandler) return plainApp;
+        if (h instanceof CodeStringHandler) return scriptGame || plainApp || TEXT_HINT.matcher(path).find();
         return kind != Kind.APK || TEXT_HINT.matcher(path).find();
     }
 
@@ -154,6 +192,10 @@ public final class GameProject {
         String low = path.toLowerCase(Locale.ROOT);
         if (RpgMakerHandler.PATH.matcher(path).matches()) return new RpgMakerHandler();
         if (low.endsWith(".rpy")) return new RenpyHandler();
+        if (low.equals("resources.arsc")) return new ArscHandler();
+        if (low.endsWith(".js") || low.endsWith(".mjs")) return new CodeStringHandler(false);
+        if (low.endsWith(".lua")) return new CodeStringHandler(true);
+        if (low.endsWith(".ks")) return new TyranoHandler();
         if (low.endsWith(".json")) return new SimpleHandlers.JsonHandler();
         if (low.endsWith(".csv") || low.endsWith(".tsv")) return new SimpleHandlers.CsvHandler();
         if (low.endsWith(".xml")) return new SimpleHandlers.XmlHandler();
@@ -166,6 +208,8 @@ public final class GameProject {
     private void detectEngine(Set<String> names) {
         boolean unity = false, unreal = false, godot = false, cocos = false, flutter = false, renpyLib = false;
         boolean rpgm = false, rpy = false, rpyc = false, rpa = false, vxace = false, html = false;
+        boolean gamemaker = false, love = false, defold = false, solar = false, kirikiri = false, wolf = false;
+        boolean tyrano = false, dex = false;
         for (String n : names) {
             String l = n.toLowerCase(Locale.ROOT);
             if (l.endsWith("libunity.so") || l.endsWith("libil2cpp.so") || l.contains("assets/bin/data/") || l.endsWith("globalgamemanagers")) unity = true;
@@ -179,7 +223,15 @@ public final class GameProject {
             if (l.endsWith(".rpyc")) rpyc = true;
             if (l.endsWith(".rpa")) rpa = true;
             if (l.endsWith(".rvdata2") || l.endsWith(".rvdata") || l.endsWith(".rxdata")) vxace = true;
-            if (l.endsWith("assets/www/index.html") || l.equals("index.html")) html = true;
+            if (l.endsWith("assets/www/index.html") || l.equals("index.html") || l.endsWith("/index.html") && l.startsWith("assets/")) html = true;
+            if (l.endsWith("libyoyo.so") || l.endsWith("game.droid") || l.endsWith("data.win")) gamemaker = true;
+            if (l.endsWith("liblove.so") || l.endsWith(".love")) love = true;
+            if (l.endsWith("libdmengine.so")) defold = true;
+            if (l.endsWith("libcorona.so") || l.endsWith("libsolar2d.so") || l.endsWith("resource.car")) solar = true;
+            if (l.endsWith(".xp3")) kirikiri = true;
+            if (l.endsWith(".wolf")) wolf = true;
+            if (l.endsWith(".ks") || l.contains("/tyrano/")) tyrano = true;
+            if (l.matches("classes\\d*\\.dex")) dex = true;
         }
         if (rpgm) engine = "RPG 쯔꾸르 MV/MZ";
         else if (rpy) {
@@ -206,13 +258,72 @@ public final class GameProject {
         } else if (flutter) {
             engine = "플러터";
             notes.add("플러터 앱의 문구는 컴파일되어 있어 번역되지 않을 수 있어요.");
+        } else if (gamemaker) {
+            engine = "게임메이커";
+            notes.add("게임메이커 게임은 대사가 game.droid 안에 들어 있고 한글 글자 모양이 없어 번역되지 않아요.");
+        } else if (love) {
+            engine = "LÖVE";
+            notes.add("LÖVE 게임의 스크립트는 .love 묶음 안에 있어 아직 번역할 수 없어요.");
+        } else if (defold) {
+            engine = "디폴드";
+            notes.add("디폴드 게임은 대사가 컴파일되어 있어 번역되지 않아요.");
+        } else if (solar) {
+            engine = "Solar2D";
+            notes.add("Solar2D 게임은 스크립트가 resource.car 안에 컴파일되어 있어 번역되지 않아요.");
+        } else if (kirikiri) {
+            engine = "KiriKiri";
+            notes.add("KiriKiri 게임의 .xp3 묶음은 아직 지원하지 않아요.");
+        } else if (wolf) {
+            engine = "울프 RPG";
+            notes.add("울프 RPG의 .wolf 파일은 암호화되어 있어 번역되지 않아요.");
+        } else if (tyrano) {
+            engine = "티라노빌더";
+            scriptGame = true;
         } else if (html) {
             engine = "HTML5";
+            scriptGame = true;
+        } else if (dex) {
+            engine = "안드로이드 앱";
+            plainApp = true;
         }
         if (kind == Kind.APK) {
             notes.add("번역된 APK는 서명이 달라져요. 원본 게임을 지운 뒤 설치해야 하고, 기존 세이브가 사라질 수 있어요.");
             notes.add("서명이나 파일 변조를 검사하는 게임, 온라인 게임은 실행되지 않을 수 있어요.");
         }
+    }
+
+    /** 번역할 곳을 못 찾았을 때 어떤 파일들로 이뤄졌는지 보여 준다. */
+    private void describeContents() throws IOException {
+        Map<String, Integer> ext = new LinkedHashMap<>();
+        List<ZipEntry> big = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(input)) {
+            for (ZipEntry e : Collections.list(zip.entries())) {
+                String n = e.getName();
+                if (e.isDirectory() || n.startsWith("META-INF/") || n.startsWith("res/")) continue;
+                String f = n.substring(n.lastIndexOf('/') + 1);
+                int dot = f.lastIndexOf('.');
+                String x = dot > 0 ? f.substring(dot).toLowerCase(Locale.ROOT) : "(확장자 없음)";
+                ext.merge(x, 1, Integer::sum);
+                if (!n.startsWith("lib/")) big.add(e);
+            }
+        }
+        List<Map.Entry<String, Integer>> top = new ArrayList<>(ext.entrySet());
+        top.sort((a, b) -> b.getValue() - a.getValue());
+        StringBuilder sb = new StringBuilder("파일 구성: ");
+        for (int i = 0; i < Math.min(6, top.size()); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(top.get(i).getKey()).append(' ').append(top.get(i).getValue()).append("개");
+        }
+        notes.add(sb.toString());
+        big.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
+        StringBuilder bs = new StringBuilder("큰 파일: ");
+        for (int i = 0; i < Math.min(3, big.size()); i++) {
+            if (i > 0) bs.append(", ");
+            long s = big.get(i).getSize();
+            bs.append(big.get(i).getName()).append(" (")
+              .append(s >= 1048576 ? (s / 1048576) + "MB" : Math.max(1, s / 1024) + "KB").append(')');
+        }
+        if (!big.isEmpty()) notes.add(bs.toString());
     }
 
     private Set<String> collect(FormatHandler h, String path, byte[] data) throws Exception {

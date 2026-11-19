@@ -9,7 +9,8 @@ import com.sawoo.gametranslator.core.Lang;
 final class Prefs {
     static final String ENGINE_FREE = "mlkit";
     static final String ENGINE_GEMINI = "gemini";
-    static final String DEFAULT_MODEL = "gemini-3.5-flash-lite";
+    static final String DEFAULT_MODEL = "gemini-3.8-flash";
+    private static final String OLD_DEFAULT_MODEL = "gemini-3.5-flash-lite";
 
     private final SharedPreferences sp;
 
@@ -21,7 +22,10 @@ final class Prefs {
     }
     String engine() { return sp.getString("engine", ENGINE_FREE); }
     String apiKey() { return sp.getString("apiKey", ""); }
-    String model() { return sp.getString("model", DEFAULT_MODEL); }
+    String model() {
+        String m = sp.getString("model", DEFAULT_MODEL);
+        return OLD_DEFAULT_MODEL.equals(m) ? DEFAULT_MODEL : m;
+    }
     String glossary() { return sp.getString("glossary", ""); }
 
     void setLang(Lang l) { sp.edit().putString("lang", l.name()).apply(); }

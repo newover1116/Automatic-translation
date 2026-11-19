@@ -142,7 +142,7 @@ public final class MainActivity extends Activity {
         settings(true);
         LinearLayout pick = card();
         pick.addView(label("2. 게임 파일 선택"));
-        pick.addView(body("지원 형식: APK, ZIP, 렌파이 .rpy, RPG 쯔꾸르 MV/MZ, JSON, CSV, XML, TXT, 언어 파일"));
+        pick.addView(body("지원 형식: APK, ZIP, RPG 쯔꾸르 MV/MZ, 렌파이 .rpy, HTML5 게임, 티라노 .ks, 안드로이드 앱 문자열, JS, Lua, JSON, CSV, XML, TXT"));
         Button b = primary("파일 고르기");
         b.setOnClickListener(v -> pickFile());
         pick.addView(b);
