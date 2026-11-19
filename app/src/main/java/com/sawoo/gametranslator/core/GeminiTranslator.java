@@ -18,6 +18,9 @@ public final class GeminiTranslator implements Translator {
     private final String apiKey;
     private final String model;
     private final String system;
+    /** 생각(추론) 단계를 줄여 속도를 높인다. 모델이 지원하지 않으면 다음 단계로 물러난다. */
+    private static final String[] THINKING = {"minimal", "low", null};
+    private volatile int thinking = 0;
 
     public GeminiTranslator(String apiKey, String model, Lang lang, Map<String, String> glossary) {
         this.apiKey = apiKey.trim();
@@ -40,8 +43,9 @@ public final class GeminiTranslator implements Translator {
     }
 
     @Override public boolean keepsTokens() { return true; }
-    @Override public int maxBatchSize() { return 40; }
-    @Override public int maxBatchChars() { return 6000; }
+    @Override public int maxBatchSize() { return 50; }
+    @Override public int maxBatchChars() { return 8000; }
+    @Override public int parallelism() { return 3; }
 
     @Override
     public List<String> translate(List<String> texts) throws Exception {
@@ -56,6 +60,22 @@ public final class GeminiTranslator implements Translator {
     }
 
     private List<String> request(List<String> texts) throws Exception {
+        while (true) {
+            int level = thinking;
+            try {
+                return request(texts, THINKING[level]);
+            } catch (ThinkingUnsupported e) {
+                if (level + 1 >= THINKING.length) throw new IllegalStateException(e.getMessage());
+                if (thinking == level) thinking = level + 1;
+            }
+        }
+    }
+
+    private static final class ThinkingUnsupported extends Exception {
+        ThinkingUnsupported(String m) { super(m); }
+    }
+
+    private List<String> request(List<String> texts, String thinkingLevel) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("systemInstruction", parts(system));
         Map<String, Object> user = parts(Json.write(new ArrayList<Object>(texts)));
@@ -66,6 +86,11 @@ public final class GeminiTranslator implements Translator {
         Map<String, Object> config = new LinkedHashMap<>();
         config.put("temperature", new Json.Num("0.2"));
         config.put("responseMimeType", "application/json");
+        if (thinkingLevel != null) {
+            Map<String, Object> think = new LinkedHashMap<>();
+            think.put("thinkingLevel", thinkingLevel);
+            config.put("thinkingConfig", think);
+        }
         body.put("generationConfig", config);
         byte[] payload = Json.write(body).getBytes(StandardCharsets.UTF_8);
 
@@ -86,6 +111,9 @@ public final class GeminiTranslator implements Translator {
                 int code = c.getResponseCode();
                 if (code == 429 || code >= 500) continue;
                 String resp = read(code < 400 ? c.getInputStream() : c.getErrorStream());
+                if (code == 400 && thinkingLevel != null && resp.toLowerCase().contains("thinking")) {
+                    throw new ThinkingUnsupported(friendlyError(code, resp));
+                }
                 if (code >= 400) throw new IllegalStateException(friendlyError(code, resp));
                 return parse(resp);
             } catch (IOException e) {

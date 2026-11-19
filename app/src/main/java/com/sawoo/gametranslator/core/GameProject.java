@@ -9,6 +9,7 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -16,6 +17,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
@@ -358,22 +366,53 @@ public final class GameProject {
         Result r = new Result();
         int total = all.size();
         int done = total - todo.size();
-        int i = 0;
-        while (i < todo.size()) {
-            if (p.cancelled()) throw new InterruptedException();
-            p.update(done, total, "번역 중");
+
+        List<List<String>> batches = new ArrayList<>();
+        for (int i = 0; i < todo.size(); ) {
             int j = i, chars = 0;
             while (j < todo.size() && j - i < tr.maxBatchSize()
                     && (j == i || chars + todo.get(j).length() <= tr.maxBatchChars())) {
                 chars += todo.get(j).length();
                 j++;
             }
-            List<String> batch = todo.subList(i, j);
-            Map<String, String> res = tr.keepsTokens() ? translateMasked(tr, batch) : translatePieces(tr, batch);
-            mem.putAll(res);
-            r.failed += batch.size() - res.size();
-            done += batch.size();
+            batches.add(new ArrayList<>(todo.subList(i, j)));
             i = j;
+        }
+
+        // 여러 묶음을 동시에 보내고, 끝나는 대로 저장한다 (중간에 끊겨도 이어하기 가능)
+        ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, tr.parallelism()));
+        CompletionService<Map<String, String>> cs = new ExecutorCompletionService<>(pool);
+        Map<Future<Map<String, String>>, Integer> sizes = new HashMap<>();
+        try {
+            for (List<String> batch : batches) {
+                sizes.put(cs.submit(() -> {
+                    if (p.cancelled()) throw new InterruptedException();
+                    return tr.keepsTokens() ? translateMasked(tr, batch) : translatePieces(tr, batch);
+                }), batch.size());
+            }
+            p.update(done, total, "번역 중");
+            for (int k = 0; k < batches.size(); k++) {
+                Future<Map<String, String>> f;
+                while ((f = cs.poll(500, TimeUnit.MILLISECONDS)) == null) {
+                    if (p.cancelled()) throw new InterruptedException();
+                }
+                Map<String, String> res;
+                try {
+                    res = f.get();
+                } catch (ExecutionException e) {
+                    Throwable c = e.getCause();
+                    if (c instanceof Exception) throw (Exception) c;
+                    throw new RuntimeException(c);
+                }
+                mem.putAll(res);
+                int size = sizes.get(f);
+                done += size;
+                r.failed += size - res.size();
+                if (p.cancelled()) throw new InterruptedException();
+                p.update(done, total, "번역 중");
+            }
+        } finally {
+            pool.shutdownNow();
         }
         p.update(total, total, "번역 완료");
         r.translated = total - r.failed;
@@ -401,25 +440,46 @@ public final class GameProject {
         return res;
     }
 
+    /** 묶음 안 모든 문장의 조각을 한꺼번에 번역한다 (문장마다 따로 요청하지 않는다). */
     private Map<String, String> translatePieces(Translator tr, List<String> batch) throws Exception {
         Map<String, String> res = new LinkedHashMap<>();
+        List<String> owners = new ArrayList<>();
+        List<List<Protector.Piece>> pieceLists = new ArrayList<>();
+        List<String> inputs = new ArrayList<>();
         for (String s : batch) {
-            String core = s.trim();
-            List<Protector.Piece> pieces = Protector.split(core);
-            List<String> inputs = new ArrayList<>();
+            List<Protector.Piece> pieces = Protector.split(s.trim());
+            int before = inputs.size();
             for (Protector.Piece pc : pieces) if (pc.translatable) inputs.add(pc.text.trim());
-            if (inputs.isEmpty()) { res.put(s, s); continue; }
-            List<String> out = tr.translate(inputs);
+            if (inputs.size() == before) { res.put(s, s); continue; }
+            owners.add(s);
+            pieceLists.add(pieces);
+        }
+        if (inputs.isEmpty()) return res;
+
+        List<String> out = new ArrayList<>(inputs.size());
+        for (int i = 0; i < inputs.size(); ) {
+            int j = i, chars = 0;
+            while (j < inputs.size() && j - i < tr.maxBatchSize()
+                    && (j == i || chars + inputs.get(j).length() <= tr.maxBatchChars())) {
+                chars += inputs.get(j).length();
+                j++;
+            }
+            List<String> part = tr.translate(new ArrayList<>(inputs.subList(i, j)));
+            for (int k = 0; k < j - i; k++) out.add(k < part.size() ? part.get(k) : null);
+            i = j;
+        }
+
+        int n = 0;
+        for (int k = 0; k < owners.size(); k++) {
             StringBuilder sb = new StringBuilder();
-            int n = 0;
-            boolean ok = out.size() == inputs.size();
-            for (Protector.Piece pc : pieces) {
+            boolean ok = true;
+            for (Protector.Piece pc : pieceLists.get(k)) {
                 if (!pc.translatable) { sb.append(pc.text); continue; }
-                String t = ok ? out.get(n++) : null;
-                if (t == null || t.trim().isEmpty()) { ok = false; break; }
+                String t = out.get(n++);
+                if (t == null || t.trim().isEmpty()) { ok = false; continue; }
                 sb.append(keepEdges(pc.text, t.trim()));
             }
-            if (ok) res.put(s, keepEdges(s, sb.toString()));
+            if (ok) res.put(owners.get(k), keepEdges(owners.get(k), sb.toString()));
         }
         return res;
     }
