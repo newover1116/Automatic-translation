@@ -36,6 +36,7 @@ public final class GameProject {
     public enum Kind { SINGLE, ZIP, APK }
 
     public static final String FONT_FILE = "gt_korean_font.ttf";
+    private static final Pattern RGSS_FONT = Pattern.compile("(?i)(?:^|/)fonts/[^/]+\\.(?:ttf|otf)$");
     private static final String FONT_SCRIPT = "zz_gt_korean_font.rpy";
     private static final long MAX_TEXT_FILE = 40L * 1024 * 1024;
 
@@ -84,6 +85,8 @@ public final class GameProject {
     private boolean plainApp;
     /** 대사가 스크립트 코드에 들어 있는 게임(HTML5, 티라노 등) */
     private boolean scriptGame;
+    /** RPG 쯔꾸르 XP/VX/VX Ace (포켓몬 에센셜 포함) */
+    private boolean rgss;
 
     private GameProject(File input, String displayName, Kind kind, Lang lang) {
         this.input = input;
@@ -164,7 +167,7 @@ public final class GameProject {
                 FormatHandler h = eligible(e);
                 if (h == null) continue;
                 byte[] data = readAll(zip, e);
-                if (!(h instanceof ArscHandler) && Encoding.looksBinary(data)) continue;
+                if (!(h instanceof ArscHandler) && !(h instanceof RxdataHandler) && Encoding.looksBinary(data)) continue;
                 Set<String> found;
                 try {
                     found = collect(h, e.getName(), data);
@@ -190,7 +193,9 @@ public final class GameProject {
     }
 
     private boolean recommended(String path, FormatHandler h) {
-        if (h instanceof RpgMakerHandler || h instanceof RenpyHandler || h instanceof TyranoHandler) return true;
+        if (h instanceof RpgMakerHandler || h instanceof RxdataHandler || h instanceof RenpyHandler || h instanceof TyranoHandler) return true;
+        // 에센셜의 PBS·플러그인 텍스트는 게임이 읽지 않거나(컴파일된 .dat를 읽음) 바꾸면 깨질 수 있다
+        if (rgss) return false;
         if (h instanceof ArscHandler) return plainApp;
         if (h instanceof CodeStringHandler) return scriptGame || plainApp || TEXT_HINT.matcher(path).find();
         return kind != Kind.APK || TEXT_HINT.matcher(path).find();
@@ -199,6 +204,7 @@ public final class GameProject {
     static FormatHandler handlerFor(String path, Kind kind) {
         String low = path.toLowerCase(Locale.ROOT);
         if (RpgMakerHandler.PATH.matcher(path).matches()) return new RpgMakerHandler();
+        if (RxdataHandler.PATH.matcher(path).matches()) return new RxdataHandler();
         if (low.endsWith(".rpy")) return new RenpyHandler();
         if (low.equals("resources.arsc")) return new ArscHandler();
         if (low.endsWith(".js") || low.endsWith(".mjs")) return new CodeStringHandler(false);
@@ -217,7 +223,7 @@ public final class GameProject {
         boolean unity = false, unreal = false, godot = false, cocos = false, flutter = false, renpyLib = false;
         boolean rpgm = false, rpy = false, rpyc = false, rpa = false, vxace = false, html = false;
         boolean gamemaker = false, love = false, defold = false, solar = false, kirikiri = false, wolf = false;
-        boolean tyrano = false, dex = false;
+        boolean tyrano = false, dex = false, rxdata = false, pbs = false, rgssad = false;
         for (String n : names) {
             String l = n.toLowerCase(Locale.ROOT);
             if (l.endsWith("libunity.so") || l.endsWith("libil2cpp.so") || l.contains("assets/bin/data/") || l.endsWith("globalgamemanagers")) unity = true;
@@ -231,6 +237,9 @@ public final class GameProject {
             if (l.endsWith(".rpyc")) rpyc = true;
             if (l.endsWith(".rpa")) rpa = true;
             if (l.endsWith(".rvdata2") || l.endsWith(".rvdata") || l.endsWith(".rxdata")) vxace = true;
+            if (RxdataHandler.PATH.matcher(n).matches()) rxdata = true;
+            if (l.startsWith("pbs/") || l.contains("/pbs/")) pbs = true;
+            if (l.endsWith(".rgssad") || l.endsWith(".rgss2a") || l.endsWith(".rgss3a")) rgssad = true;
             if (l.endsWith("assets/www/index.html") || l.equals("index.html") || l.endsWith("/index.html") && l.startsWith("assets/")) html = true;
             if (l.endsWith("libyoyo.so") || l.endsWith("game.droid") || l.endsWith("data.win")) gamemaker = true;
             if (l.endsWith("liblove.so") || l.endsWith(".love")) love = true;
@@ -248,9 +257,17 @@ public final class GameProject {
         } else if (renpyLib || rpyc || rpa) {
             engine = "렌파이";
             notes.add("대사가 컴파일된 .rpyc/.rpa 파일에 들어 있어 번역할 수 없어요. .rpy 원본이 들어 있는 버전이 필요해요.");
+        } else if (rxdata) {
+            rgss = true;
+            engine = pbs ? "포켓몬 에센셜 (RPG 쯔꾸르 XP)" : "RPG 쯔꾸르 XP/VX/VX Ace";
+            notes.add("이벤트 대사, 선택지, 데이터베이스 이름을 번역해요. 게임 글꼴은 한글이 나오는 글꼴로 바꿔요.");
+            notes.add("스크립트 안에 들어 있는 메뉴 문구" + (pbs ? "와 포켓몬·기술·도구 이름" : "") + "은 영어로 남아요.");
+        } else if (rgssad) {
+            engine = "RPG 쯔꾸르 XP/VX/VX Ace";
+            notes.add("대사가 암호화된 묶음(.rgssad/.rgss3a) 안에 들어 있어 아직 번역할 수 없어요.");
         } else if (vxace) {
-            engine = "RPG 쯔꾸르 VX/XP";
-            notes.add("VX Ace 이하의 .rvdata 형식은 지원하지 않아요. MV/MZ 게임만 번역할 수 있어요.");
+            engine = "RPG 쯔꾸르 XP/VX/VX Ace";
+            notes.add("Data 폴더에서 대사 파일(Map001 등)을 찾지 못했어요.");
         } else if (unity) {
             engine = "유니티";
             notes.add("유니티 게임 본문은 컴파일된 파일 안에 있어 번역되지 않아요. StreamingAssets 같은 외부 텍스트만 번역할 수 있어요.");
@@ -515,7 +532,7 @@ public final class GameProject {
         return dot < 0 ? displayName + "_ko" : displayName.substring(0, dot) + "_ko" + displayName.substring(dot);
     }
 
-    /** @param font 렌파이 게임에 넣을 한글 글꼴. 없으면 null. */
+    /** @param font 렌파이·쯔꾸르 XP 게임에 넣을 한글 글꼴. 없으면 null. */
     public void build(File output, TranslationMemory mem, byte[] font, Progress p) throws Exception {
         UnaryOperator<String> fn = s -> {
             String t = mem.get(s);
@@ -548,6 +565,11 @@ public final class GameProject {
                     byte[] out = handlerFor(name, kind).transform(readAll(zip, e),
                             new FormatHandler.Context(name, lang, fontName), fn);
                     writeBytes(zos, e, out);
+                } else if (rgss && font != null && RGSS_FONT.matcher(name).find()) {
+                    // 원래 글꼴에는 한글이 없어 □로 나온다. 같은 이름표를 단 한글 글꼴로 바꿔 끼운다.
+                    byte[] patched = FontPatch.withNameOf(font, readAll(zip, e));
+                    if (patched != null) writeBytes(zos, e, patched);
+                    else copy(zip, e, zos);
                 } else if (renpyDir != null && name.equals(renpyDir + "gui.rpy")) {
                     // 번역할 문장이 없어도 글꼴 설정은 한글 글꼴로 바꿔야 한다
                     byte[] out = new RenpyHandler().transform(readAll(zip, e),
